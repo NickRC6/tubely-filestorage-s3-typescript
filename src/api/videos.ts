@@ -6,6 +6,13 @@ import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { getVideo, updateVideo } from "../db/videos";
 import { randomBytes } from "crypto";
+import { stdout } from "process";
+
+function classifyRatio(ratio: number): string {
+  if (Math.abs(ratio - 1.78) < 0.05) return "landscape";
+  if (Math.abs(ratio - 0.56) < 0.05) return "portrait";
+  return "other";
+  }
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const MAX_UPLOAD_SIZE = 1 << 30;
@@ -52,11 +59,12 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   
   try {
     await Bun.write(tempPath, file);
+    const aspectRatio = await getVideoAspectRatio(tempPath);
 
-    const s3File = cfg.s3Client.file(filename);
+    const s3File = cfg.s3Client.file(`${aspectRatio}/${filename}`);
     await s3File.write(Bun.file(tempPath), { type: file.type });
 
-    const newURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${filename}`
+    const newURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`
     video.videoURL = newURL;
     
     updateVideo(cfg.db, video)
@@ -64,4 +72,36 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   } finally {
     await Bun.file(tempPath).delete();
   }
+}
+
+
+export async function getVideoAspectRatio(filePath: string) {
+  const proc = Bun.spawn([
+  "ffprobe",
+  "-v", "error",
+  "-select_streams", "v:0",
+  "-show_entries", "stream=width,height",
+  "-of", "json",
+  filePath
+], {
+  stderr: "pipe",
+  stdout: "pipe",
+})
+
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`Error: ${stderrText}`);
+  }
+
+  const data = JSON.parse(stdoutText)
+
+  const width = data.streams[0].width;
+  const height = data.streams[0].height;
+
+  const ratio = width / height;
+
+  return classifyRatio(ratio);
 }
