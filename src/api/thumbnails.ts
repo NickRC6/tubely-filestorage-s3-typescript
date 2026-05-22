@@ -26,7 +26,7 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Thumbnail file missing");
   }
 
-  const MAX_UPLOAD_SIZE = 10485760;
+  const MAX_UPLOAD_SIZE = 1 << 20;
   if (file.size > MAX_UPLOAD_SIZE) {
     throw new BadRequestError("File size exceeds maximum upload size");
   }
@@ -43,7 +43,7 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   const randomNameGen = randomBytes(32).toString("base64url");
   const filename = `${randomNameGen}.${extension[1]}` 
   const savingPath = path.join(cfg.assetsRoot, filename);
-  Bun.write(savingPath, imageBuffer);
+  await Bun.write(savingPath, imageBuffer);
   const dataURL = `http://localhost:${cfg.port}/${savingPath}`;
 
 
