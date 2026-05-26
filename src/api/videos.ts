@@ -6,7 +6,6 @@ import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { getVideo, updateVideo } from "../db/videos";
 import { randomBytes } from "crypto";
-import { stdout } from "process";
 
 function classifyRatio(ratio: number): string {
   if (Math.abs(ratio - 1.78) < 0.05) return "landscape";
@@ -56,13 +55,17 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const randomNameGen = randomBytes(32).toString("hex");
   const filename = `${randomNameGen}${extension}` 
   const tempPath = `/tmp/${filename}`;
+
+  let processedVideo: string | undefined;
   
   try {
     await Bun.write(tempPath, file);
+    processedVideo = await processVideoForFastStart(tempPath); 
+
     const aspectRatio = await getVideoAspectRatio(tempPath);
 
     const s3File = cfg.s3Client.file(`${aspectRatio}/${filename}`);
-    await s3File.write(Bun.file(tempPath), { type: file.type });
+    await s3File.write(Bun.file(processedVideo), { type: file.type });
 
     const newURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`
     video.videoURL = newURL;
@@ -71,6 +74,9 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
     return respondWithJSON(200, video);
   } finally {
     await Bun.file(tempPath).delete();
+    if (processedVideo) {
+      await Bun.file(processedVideo).delete();
+    }
   }
 }
 
@@ -104,4 +110,28 @@ export async function getVideoAspectRatio(filePath: string) {
   const ratio = width / height;
 
   return classifyRatio(ratio);
+}
+
+export async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = inputFilePath + ".processed";
+
+  const proc = Bun.spawn([
+    "ffmpeg",
+    "-i", inputFilePath,
+    "-movflags", "faststart",
+    "-map_metadata", "0",
+    "-codec", "copy", "-f", "mp4", outputFilePath
+  ], {
+    stderr: "pipe",
+    stdout: "pipe",
+  })
+
+  const stderrText = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`Error: ${stderrText}`);
+  }
+
+  return outputFilePath;
 }
